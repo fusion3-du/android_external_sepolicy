@@ -184,6 +184,7 @@ neverallow {
   -vold
   -dumpstate
   -system_server
+  -init
   userdebug_or_eng(`-procrank')
   userdebug_or_eng(`-perfprofd')
 } self:capability sys_ptrace;
@@ -197,8 +198,9 @@ neverallow {
   -vold
 } self:capability mknod;
 
+attribute rmt_placeholder;
 # Limit raw I/O to these whitelisted domains.
-neverallow { domain -kernel -init -recovery -ueventd -watchdogd -healthd -vold -uncrypt -tee } self:capability sys_rawio;
+neverallow { domain -kernel -init -recovery -ueventd -watchdogd -healthd -vold -uncrypt -tee -rmt_placeholder } self:capability sys_rawio;
 
 # No process can map low memory (< CONFIG_LSM_MMAP_MIN_ADDR).
 neverallow domain self:memprotect mmap_zero;
@@ -237,7 +239,7 @@ neverallow { domain -system_server -recovery } security_file:lnk_file { create s
 # the init.rc, so the setenforce occurs while still in kernel. After
 # switching domains, there is never any need to setenforce again by init.
 neverallow { domain -system_app } kernel:security setenforce;
-neverallow { domain -kernel -system_app } kernel:security setcheckreqprot;
+neverallow { domain -kernel } kernel:security setcheckreqprot;
 
 # No booleans in AOSP policy, so no need to ever set them.
 neverallow domain kernel:security setbool;
@@ -254,8 +256,8 @@ neverallow { domain -init -system_server -ueventd } hw_random_device:chr_file *;
 neverallow domain { file_type -exec_type }:file entrypoint;
 
 # Ensure that nothing in userspace can access /dev/mem or /dev/kmem
-neverallow { domain -kernel -ueventd -init } kmem_device:chr_file *;
-neverallow domain kmem_device:chr_file ~{ create relabelto unlink setattr };
+neverallow { domain -rmt_placeholder -kernel -ueventd -init } kmem_device:chr_file *;
+neverallow { domain -rmt_placeholder } kmem_device:chr_file ~{ create relabelto unlink setattr };
 
 # Only init should be able to configure kernel usermodehelpers or
 # security-sensitive proc settings.
@@ -271,7 +273,7 @@ neverallow domain init:binder *;
 
 # Don't allow raw read/write/open access to block_device
 # Rather force a relabel to a more specific type
-neverallow { domain -kernel -init -recovery -vold -uncrypt } block_device:blk_file { open read write };
+neverallow { domain -kernel -init -recovery -vold -uncrypt -qti_init_shell } block_device:blk_file { open read write };
 
 # Don't allow raw read/write/open access to generic devices.
 # Rather force a relabel to a more specific type.
@@ -282,7 +284,7 @@ neverallow { domain -init -ueventd } device:chr_file { open read write };
 # Limit what domains can mount filesystems or change their mount flags.
 # sdcard_type / vfat is exempt as a larger set of domains need
 # this capability, including device-specific domains.
-neverallow { domain -kernel -init -recovery -vold -zygote } { fs_type -sdcard_type }:filesystem { mount remount relabelfrom relabelto };
+neverallow { domain -kernel -init -recovery -vold -zygote -sysinit -qti_init_shell } { fs_type -sdcard_type }:filesystem { mount remount relabelfrom relabelto };
 
 #
 # Assert that, to the extent possible, we're not loading executable content from
@@ -292,11 +294,12 @@ neverallow {
     domain
     -appdomain
     -dumpstate
-    -shell
     -mediaserver
+    -shell
     userdebug_or_eng(`-su')
     -system_server
     -zygote
+    -qti_init_shell
 } { file_type -system_file -exec_type }:file execute;
 neverallow {
     domain
@@ -310,7 +313,9 @@ neverallow { domain -init -recovery } property_data_file:file no_w_file_perms;
 
 # Only recovery should be doing writes to /system
 neverallow { domain -recovery } { system_file exec_type }:dir_file_class_set
-    { create write setattr relabelfrom append unlink link rename };
+    { create write relabelfrom append unlink link rename };
+neverallow { domain -recovery -qti_init_shell } { system_file exec_type }:dir_file_class_set
+    { setattr };
 neverallow { domain -recovery -kernel } { system_file exec_type }:dir_file_class_set relabelto;
 
 # Don't allow mounting on top of /system files or directories
@@ -324,7 +329,11 @@ ifelse(shipping_build, `true',
 
 # Restrict context mounts to specific types marked with
 # the contextmount_type attribute.
-neverallow domain {fs_type -contextmount_type -sdcard_posix}:filesystem relabelto;
+ifelse(shipping_build, `true',
+  `neverallow domain {fs_type -contextmount_type}:filesystem relabelto;'
+,
+  `neverallow domain {fs_type -contextmount_type -sdcard_posix}:filesystem relabelto;'
+)
 
 # Ensure that context mount types are not writable, to ensure that
 # the write to /system restriction above is not bypassed via context=
@@ -341,7 +350,7 @@ neverallow domain default_android_service:service_manager add;
 
 # Require that domains explicitly label unknown properties, and do not allow
 # anyone but init to modify unknown properties.
-neverallow { domain -init } default_prop:property_service set;
+neverallow { domain -init -sysinit } default_prop:property_service set;
 
 neverallow { domain -init -recovery -system_server } frp_block_device:blk_file rw_file_perms;
 
@@ -357,15 +366,15 @@ neverallow { domain -servicemanager } *:binder set_context_mgr;
 # Only authorized processes should be writing to files in /data/dalvik-cache
 # (excluding /data/dalvik-cache/profiles, which is labeled differently)
 ifelse(shipping_build, `true',
-  `neverallow { domain -init -zygote -installd -dex2oat } dalvikcache_data_file:file no_w_file_perms;'
+  `neverallow { domain -init -zygote -installd -dex2oat -shell -qti_init_shell } dalvikcache_data_file:file no_w_file_perms;'
 ,
-  `neverallow { domain -init -zygote -installd -dex2oat -system_server -recovery} dalvikcache_data_file:file no_w_file_perms;'
+  `neverallow { domain -init -zygote -installd -dex2oat -system_server -recovery -shell -qti_init_shell } dalvikcache_data_file:file no_w_file_perms;'
 )
 
 ifelse(shipping_build, `true',
-  `neverallow { domain -init -installd -dex2oat -zygote } dalvikcache_data_file:dir no_w_dir_perms;'
+  `neverallow { domain -init -installd -dex2oat -zygote -shell -qti_init_shell } dalvikcache_data_file:dir no_w_dir_perms;'
 ,
-  `neverallow { domain -init -installd -dex2oat -zygote -recovery } dalvikcache_data_file:dir no_w_dir_perms;'
+  `neverallow { domain -init -installd -dex2oat -zygote -recovery -shell -qti_init_shell } dalvikcache_data_file:dir no_w_dir_perms;'
 )
 
 # Only system_server should be able to send commands via the zygote socket
@@ -435,11 +444,11 @@ neverallow ~domain domain:process { transition dyntransition };
 # Example type transition:
 #  mydomain.te:file_type_auto_trans(mydomain, system_data_file, new_file_type)
 #
-ifelse(shipping_build, `true',
-  `neverallow { domain -system_server -system_app -init -installd } system_data_file:file no_w_file_perms;'
-,
-  `neverallow { domain -system_server -system_app -init -installd -recovery } system_data_file:file no_w_file_perms;'
-)
+#ifelse(shipping_build, `true',
+#  `neverallow { domain -system_server -system_app -init -installd } system_data_file:file no_w_file_perms;'
+#,
+#  `neverallow { domain -system_server -system_app -init -installd -recovery } system_data_file:file no_w_file_perms;'
+#)
 
 # do not grant anything greater than r_file_perms and relabelfrom unlink
 # to installd
